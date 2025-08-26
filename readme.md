@@ -72,16 +72,17 @@ flowchart TD
   U[Upload PDF] --> A1[PDF Detector]
   A1 -->|native| A2[Extract text per page]
   A1 -->|scan| A3[OCR per page]
-  A1 -->|hybrid| A4[OCR only low-text pages]
+  A1 -->|hybrid| A4[OCR low-text pages]
   A3 --> A5[Merge text]
   A4 --> A5
   A2 --> A5
-  A5 --> A6[Chunk and Embedding]
-  A6 --> A7[(ChromaDB vector store)]
-  A5 --> A8[LLM Extraction JSON (format=json)]
-  A8 --> A9[LLM Risk Summary JSON]
+  A5 --> A6[Chunk and embedding]
+  A6 --> A7[(ChromaDB)]
+  A5 --> A8[LLM extraction JSON]
+  A8 --> A9[LLM risk summary JSON]
   A9 --> A10[Write report JSON to data/reports/doc_id.json]
-  A10 --> A11[Record document in SQLite (id, user_id, pages)]
+  A10 --> A11[Record document in SQLite]
+
 ```
 
 **Catatan**
