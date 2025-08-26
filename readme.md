@@ -28,7 +28,7 @@ Aplikasi end-to-end untuk **analisis dokumen kredit** (PDF native/scan) dan **ta
 
 ```mermaid
 graph TD
-  A[Browser / Streamlit UI] -->|HTTP JSON| B[FastAPI Backend]
+  A[Browser<br/>Streamlit UI] -->|HTTP JSON| B[FastAPI Backend]
 
   subgraph Frontend
     A
@@ -38,32 +38,33 @@ graph TD
     B --> C[Auth / JWT]
     B --> D[Analyzer /analyze]
     B --> E[Chat /chat]
-    B --> K[/doc/:id or /docs/]
+    B --> K[/doc/:id  atau  /docs/]
   end
 
+  %% Hindari ":" di judul subgraph untuk kompatibilitas renderer
   subgraph Pipeline_Analyze
-    D --> F[PDF Detector (pypdf)]
+    D --> F[PDF Detector<br/>pypdf: native / scan / hybrid]
     F -->|native text| H[Text Merger]
-    F -->|scan pages| G[OCR (OpenCV + Tesseract)]
+    F -->|scan pages| G[OCR Engine<br/>OpenCV + Tesseract]
     G --> H
-    H --> I[Chunking & Embedding (MiniLM)]
-    I --> J[(ChromaDB)]
-    H --> L[LLM Extraction JSON]
-    L --> M[LLM Risk Summary]
-    M --> N[Write Report JSON]
-    N --> O[(SQLite documents)]
+    H --> I[Chunking & Embedding<br/>MiniLM-L6-v2]
+    I --> J[(ChromaDB<br/>vectordb/)]
+    H --> L[Ollama LLM<br/>Extraction JSON]
+    L --> M[Ollama LLM<br/>Risk Summary JSON]
+    M --> N[Write Report JSON<br/>data/reports/]
+    N --> O[(SQLite db/app.db)<br/>documents]
   end
 
   subgraph Pipeline_Chat
-    E --> P[Retriever: Query Chroma (doc_id,user_id)]
-    P --> Q[Context top-k]
-    Q --> R[LLM Answer (+p.N)]
+    E --> P[Retriever: Query Chroma<br/>where doc_id & user_id]
+    P --> Q[Context (top-k)]
+    Q --> R[Ollama LLM<br/>Answer + (p.N)]
   end
 
+  %% Edge bertitik dengan label: gunakan pola A-. label .->B
   C -. uses .-> O
   O -. lists .-> K
   N -. reads .-> K
-
 ```
 
 ---
