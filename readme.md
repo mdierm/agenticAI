@@ -24,86 +24,208 @@ Aplikasi end-to-end untuk **analisis dokumen kredit** (PDF native/scan) dan **ta
 
 ---
 
-## 🔭 Arsitektur Sistem
+# Arsitektur Sistem (Detail)
+
+Aplikasi melakukan ekstraksi dan analisis dokumen kredit (PDF native / scan) serta tanya-jawab berbasis isi dokumen menggunakan RAG. Mendukung multi-user dengan isolasi data per user.
+
+## 1) Topologi Sistem (Detail)
 
 ```mermaid
 flowchart TD
-A[Streamlit UI] -->|HTTP JSON| B[FastAPI Backend]
+  A[Streamlit UI] -->|HTTP JSON| B[FastAPI Backend]
 
-subgraph Frontend
-A
-end
+  subgraph Frontend
+    A
+  end
 
-subgraph Backend
-B --> C[Auth JWT]
-B --> D[Analyze]
-B --> E[Chat]
-B --> K[/doc/:id dan /health]
-end
+  subgraph Backend
+    B --> C[Auth / JWT]
+    B --> D[Service Analyze]
+    B --> E[Service Chat]
+    B --> K[API: /doc/:id, /docs, /health]
+  end
 
-B --> F[OCR dan PDF Detector]
-B --> G[Chunking dan Embedding]
-B --> H[ChromaDB]
-B --> I[Ollama LLM]
-B --> J[Filesystem data/*]
-B --> L[SQLite db/app.db]
+  B --> F[PDF Detector dan OCR Controller]
+  B --> G[Chunking dan Embedding]
+  B --> I[Ollama LLM]
+  B --> H[(ChromaDB vectordb)]
+  B --> L[(SQLite db/app.db)]
+  B --> J[Filesystem data folder]
 ```
+
+**Keterangan singkat**
+
+* **Frontend**: login, upload PDF, melihat hasil ekstraksi & ringkasan, chat QA.
+* **Backend**: orkestrasi pipeline (deteksi native/scan, OCR bila perlu, RAG, LLM).
+* **Storage**:
+
+  * `data/input` PDF, `data/images` halaman PNG untuk OCR, `data/ocr` teks, `data/reports` JSON hasil.
+  * `vectordb` untuk Chroma.
+  * `db/app.db` SQLite untuk user & metadata dokumen.
 
 ---
 
-## 🔁 Alur Kerja
-
-### 1) Analyze (Upload → JSON)
+## 2) Pipeline Analyze (Upload → JSON hasil + indeks RAG)
 
 ```mermaid
-sequenceDiagram
-  autonumber
-  participant U as User (Streamlit)
-  participant API as FastAPI /analyze
-  participant DET as PDF Detector
-  participant OCR as OCR (Tesseract)
-  participant EMB as Embedding (MiniLM)
-  participant VEC as ChromaDB
-  participant LLM as Ollama (Llama 3.1)
-  participant DB as SQLite
-  participant FS as data/*
-
-  U->>API: POST /analyze (PDF)
-  API->>DET: Detect native/scan/hybrid
-  alt native
-    DET-->>API: text per halaman
-  else scanned/hybrid
-    API->>OCR: render+preprocess+OCR (perlu saja)
-    OCR-->>API: text per halaman (digabung)
-  end
-  API->>EMB: chunk + embed
-  EMB->>VEC: add(ids, docs, metadatas{user_id, doc_id, page})
-  API->>LLM: ekstraksi JSON (format=json)
-  LLM-->>API: json_struct
-  API->>LLM: risk summary (format=json)
-  LLM-->>API: risk_summary
-  API->>FS: tulis report JSON (data/reports/{doc_id}.json)
-  API->>DB: INSERT documents(doc_id, user_id, pages)
-  API-->>U: {doc_id, pages, json_struct, risk_summary}
+flowchart TD
+  U[Upload PDF] --> A1[PDF Detector]
+  A1 -->|native| A2[Ekstrak teks per halaman]
+  A1 -->|scan| A3[OCR per halaman]
+  A1 -->|hybrid| A4[OCR hanya halaman minim teks]
+  A3 --> A5[Gabung teks]
+  A4 --> A5
+  A2 --> A5
+  A5 --> A6[Chunk dan Embedding]
+  A6 --> A7[(ChromaDB simpan vektor\nmetadata: doc_id, user_id, page)]
+  A5 --> A8[LLM Ekstraksi JSON\noptions: format json]
+  A8 --> A9[LLM Ringkasan Risiko\nformat json]
+  A9 --> A10[Tulis report JSON\nke data/reports/{doc_id}.json]
+  A10 --> A11[Catat dokumen di SQLite\n(id, user_id, pages)]
 ```
 
-### 2) Chat (Q\&A Berbasis Dokumen)
+**Catatan**
+
+* Detector menilai kepadatan teks per halaman. Mode **hybrid** hanya OCR halaman yang perlu → lebih cepat.
+* Metadata vektor di Chroma menyimpan `doc_id`, `user_id`, `page` untuk **isolasi per user** dan sitasi halaman saat QA.
+
+---
+
+## 3) Pipeline Chat (QA berbasis dokumen)
 
 ```mermaid
-sequenceDiagram
-  autonumber
-  participant U as User (Streamlit)
-  participant API as FastAPI /chat
-  participant VEC as ChromaDB
-  participant LLM as Ollama (Llama 3.1)
-
-  U->>API: POST /chat {doc_id, question, history}
-  API->>VEC: query(where: {$and:[doc_id, user_id]}, top-k)
-  VEC-->>API: contexts + metadatas(page)
-  API->>LLM: prompt(QA) + contexts
-  LLM-->>API: answer (+ sitasi p.N)
-  API-->>U: {answer, sources}
+flowchart TD
+  Q[Pertanyaan user] --> C1[Query Chroma]
+  C1 --> C2[Filter where\n$and: doc_id dan user_id]
+  C2 --> C3[Ambil context top-k\n+ metadata page]
+  C3 --> C4[LLM QA berdasarkan context]
+  C4 --> C5[Jawaban + sitasi halaman]
 ```
+
+**Perilaku**
+
+* Prompt QA memaksa jawaban **hanya** dari konteks. Jika tidak ditemukan → jawab “Tidak ditemukan di konteks”.
+* Bila metadata halaman ada, model menyertakan sitasi `(p.N)`.
+
+---
+
+## 4) Interaksi Modul Backend
+
+```mermaid
+flowchart TD
+  M1[main.py] --> M2[auth.py]
+  M1 --> M3[ocr_pipeline.py]
+  M1 --> M4[rag.py]
+  M1 --> M5[agent.py]
+  M1 --> M6[models.py]
+  M1 --> M7[utils.py]
+  M1 --> M8[db_bootstrap.py]
+
+  M3 --> M7
+  M4 --> M7
+  M5 --> M7
+  M6 --> M8
+```
+
+**Ringkasan fungsi**
+
+* **main.py**: definisi endpoint, wiring modul, CORS, inisialisasi RagStore.
+* **auth.py**: login, verifikasi JWT, dependency `get_current_user`.
+* **ocr\_pipeline.py**: deteksi native/scan/hybrid, render halaman, preprocess OpenCV, OCR Tesseract.
+* **rag.py**: Chroma PersistentClient, add\_pages (chunk per halaman), query dengan filter `(doc_id, user_id)`.
+* **agent.py**: panggilan LLM (ekstraksi JSON, ringkasan risiko, QA), hitung rasio (DSCR, ICR, FCCR, Current, Quick, DER, EBITDA Margin).
+* **models.py**: SQLModel untuk `users`, `documents`.
+* **utils.py**: helper IO, sanitasi JSON, pembuatan direktori.
+* **db\_bootstrap.py**: create\_all skema SQLite saat bootstrap.
+
+---
+
+## 5) Model Data & Isolasi
+
+```mermaid
+erDiagram
+  USERS ||--o{ DOCUMENTS : owns
+  USERS {
+    int id
+    string username
+    string password_hash
+    datetime created_at
+  }
+  DOCUMENTS {
+    string id
+    int user_id
+    int pages
+    datetime created_at
+  }
+```
+
+**Vector Store (ChromaDB)**
+
+* **documents**: teks chunk (per halaman atau sub-halaman).
+* **metadatas**: `doc_id`, `user_id`, `page`, `chunk_index`.
+* **query**: selalu `where = {"$and":[{"doc_id": ...}, {"user_id": ...}]}` → user A tidak bisa membaca vektor user B.
+
+**Filesystem**
+
+* `data/input` → PDF,
+* `data/images` → PNG halaman,
+* `data/ocr` → hasil OCR,
+* `data/reports` → 1 file JSON per dokumen: `json_struct`, `risk_summary`, dan ringkasan lain jika ada.
+
+---
+
+## 6) Kontrak API (Inti)
+
+* `POST /auth/login` → `{ "access_token": "..." }`
+* `POST /analyze` (multipart `file=PDF`) → `{ doc_id, pages, json_struct, risk_summary }`
+* `POST /chat` `{ doc_id, question, history }` → `{ answer, sources }`
+* `GET /docs` → daftar dokumen milik user saat ini
+* `GET /doc/:id` → JSON hasil analisis tersimpan
+* `GET /health` → `{ status: "ok" }`
+
+Semua endpoint inti (kecuali `/health`) butuh header `Authorization: Bearer <token>`.
+
+---
+
+## 7) Konfigurasi Utama
+
+* **Ollama**: `OLLAMA_MODEL`, `OLLAMA_HOST`, `OLLAMA_NUM_CTX`, `OLLAMA_NUM_THREAD`, `OLLAMA_NUM_PREDICT`, `OLLAMA_TEMPERATURE`.
+* **Telemetry**: `ANONYMIZED_TELEMETRY=False`, `CHROMA_TELEMETRY_DISABLED=1`.
+* **App**: `APP_HOST`, `APP_PORT`.
+* **Frontend**: `frontend/.streamlit/secrets.toml` → `BACKEND_URL = "http://localhost:8000"`.
+
+---
+
+## 8) Alur Keamanan & Isolasi
+
+* **Login** menghasilkan JWT, disimpan di session state Streamlit.
+* **RAG** selalu disaring dengan `(doc_id, user_id)`.
+* **/docs** menarik daftar dokumen dari SQLite berdasarkan `user_id`.
+* **/doc/\:id** bisa diberi pemeriksaan kepemilikan (opsional → direkomendasikan aktif).
+
+---
+
+## 9) Performa & Skalabilitas
+
+* Model default `llama3.1:8b-instruct-q8_0` (quantized) untuk latensi interaktif.
+* OCR selektif (hybrid) menghemat waktu proses.
+* Embedding `all-MiniLM-L6-v2` seimbang; bisa diganti ke E5-small bila butuh recall lebih tinggi.
+* Pisah koleksi Chroma per lingkungan/tenant jika skala besar.
+* Batasi paralelisme OCR/LLM sesuai CPU/GPU.
+
+---
+
+## 10) Titik Enhancement
+
+* Ekstraksi tabel finansial untuk PDF teks (`pdfplumber` atau `camelot`) → isi `financials` lebih akurat.
+* Validasi skema hasil JSON (pydantic) + versioning.
+* Redaksi identitas sensitif (NPWP/NIK) saat simpan report.
+* Multi-doc RAG dalam satu user (opsi pencarian lintas dokumen).
+
+---
+
+Kalau kamu mau, aku bisa tambah **diagram deployment** (WSL + GPU + service boundary) atau **sequence diagram rinci** untuk error handling.
+
 
 ---
 
