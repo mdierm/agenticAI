@@ -225,8 +225,145 @@ Semua endpoint inti (kecuali `/health`) butuh header `Authorization: Bearer <tok
 
 ---
 
-Kalau kamu mau, aku bisa tambah **diagram deployment** (WSL + GPU + service boundary) atau **sequence diagram rinci** untuk error handling.
+mantap—aku tambahkan **diagram deployment (WSL + GPU + service boundary)** dan **sequence diagram rinci untuk error handling**. Semua sudah “GitHub-safe” (tanpa `\n` di label, tanpa `<br/>`, tiap edge satu baris). Tinggal copas ke README.md.
 
+---
+
+## 🔧 Deployment (WSL + GPU + Service Boundary)
+
+```mermaid
+flowchart LR
+  subgraph WIN[Windows 11 Host]
+    BR[Browser]
+    NV[NVIDIA Driver]
+    WSL[WSL2 integration]
+  end
+
+  BR -->|http 8501| ST
+
+  subgraph WSLU[WSL2 Ubuntu 22.04]
+    subgraph FRONT[Frontend]
+      ST[Streamlit UI]
+    end
+    subgraph BACK[Backend Service]
+      API[FastAPI Backend]
+      OCR[OpenCV Tesseract]
+      OLL[Ollama Service]
+      EMB[Sentence Transformers]
+      RAG[ChromaDB]
+      SQL[(SQLite)]
+      FS[Filesystem data folder]
+    end
+  end
+
+  ST -->|http 8000| API
+  API --> OCR
+  API --> EMB
+  API --> RAG
+  API --> OLL
+  API --> SQL
+  API --> FS
+
+  OLL --> GPU[RTX 4070 CUDA]
+  NV -. provides .- GPU
+  WSL -. passthrough .- GPU
+```
+
+**Keterangan singkat**
+
+* Browser di Windows mengakses Streamlit di WSL: `http://localhost:8501`.
+* Streamlit memanggil FastAPI: `http://localhost:8000`.
+* FastAPI memanggil: OCR, Embedding, ChromaDB, Ollama, SQLite, dan menulis ke filesystem.
+* GPU dipakai oleh Ollama (dan Torch bila digunakan oleh embedding model yang mendukung GPU).
+
+---
+
+## 🔁 Sequence: Analyze dengan Error Handling
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant BR as Browser
+  participant ST as Streamlit
+  participant API as FastAPI /analyze
+  participant DET as PDF Detector
+  participant OCR as OCR
+  participant EMB as Embedding
+  participant CH as ChromaDB
+  participant LLM as Ollama
+  participant FS as Reports JSON
+  participant DB as SQLite
+
+  BR->>ST: Upload PDF
+  ST->>API: POST /analyze multipart file
+  API->>DET: deteksi native scan hybrid
+  alt native
+    DET-->>API: text per page
+  else scan
+    API->>OCR: render preprocess ocr
+    OCR-->>API: text per page
+  else hybrid
+    API->>OCR: ocr selected pages
+    OCR-->>API: merged text
+  end
+  API->>EMB: chunk and embed
+  EMB->>CH: add vectors with doc_id user_id page
+  API->>LLM: prompt extraction format json
+  LLM-->>API: json_struct raw
+  note over API: try json.loads<br/>fallback fence strip<br/>remove trailing comma
+  API->>LLM: prompt risk summary format json
+  LLM-->>API: risk_summary raw
+  note over API: safe parse json again
+  API->>FS: write doc_id.json
+  API->>DB: insert document row
+  API-->>ST: 200 {doc_id pages json_struct risk_summary}
+  ST-->>BR: tampilkan hasil
+```
+
+**Strategi penanganan error**
+
+* **LLM bukan JSON murni** → parser aman: strip code fence, normalisasi kecil, `json.loads` retry.
+* **OCR gagal halaman tertentu** → lanjutkan halaman lain, beri flag di `risk_flags`.
+* **Chroma telemetry error** → telemetry dimatikan via env, tidak blokir proses.
+* **I/O JSON** → selalu `ensure_ascii=False` dan `indent=2`, directory ensured.
+
+---
+
+## 💬 Sequence: Chat dengan Error Handling
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant BR as Browser
+  participant ST as Streamlit
+  participant API as FastAPI /chat
+  participant CH as ChromaDB
+  participant LLM as Ollama
+
+  BR->>ST: pertanyaan user
+  ST->>API: POST {doc_id question history}
+  API->>CH: query where and doc_id user_id
+  alt ada context
+    CH-->>API: top k chunks with page
+    API->>LLM: QA prompt with context
+    LLM-->>API: answer with page refs
+    API-->>ST: 200 {answer sources}
+  else context kosong
+    CH-->>API: empty result
+    API-->>ST: 200 {answer: Tidak ditemukan di konteks, sources: []}
+  end
+  ST-->>BR: tampilkan jawaban
+```
+
+**Strategi penanganan error**
+
+* **Context kosong** → jawaban default “Tidak ditemukan di konteks”.
+* **Timeout LLM** → kembalikan 504 atau pesan error terstruktur di frontend.
+* **JSON response non-parsable di frontend** → helper `fetch_json` fallback parsing dan error preview.
+
+---
+
+Kalau kamu mau, aku juga bisa tambahkan **diagram deployment fisik** (memisah host Windows, WSL, dan jaringan), atau **diagram sequence untuk alur login dan pengelolaan dokumen**.
 
 ---
 
