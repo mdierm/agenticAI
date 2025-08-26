@@ -27,42 +27,26 @@ Aplikasi end-to-end untuk **analisis dokumen kredit** (PDF native/scan) dan **ta
 ## 🔭 Arsitektur Sistem
 
 ```mermaid
-graph TD
-  A[Browser / Streamlit UI] -->|HTTP JSON| B[FastAPI Backend]
+flowchart TD
+A[Streamlit UI] -->|HTTP JSON| B[FastAPI Backend]
 
-  subgraph Frontend
-    A
-  end
+subgraph Frontend
+A
+end
 
-  subgraph Backend
-    B --> C[Auth / JWT]
-    B --> D[Analyzer /analyze]
-    B --> E[Chat /chat]
-    B --> K[/doc/:id or /docs/]
-  end
+subgraph Backend
+B --> C[Auth JWT]
+B --> D[Analyze]
+B --> E[Chat]
+B --> K[/doc/:id dan /health]
+end
 
-  subgraph Pipeline_Analyze
-    D --> F[PDF Detector (pypdf)]
-    F -->|native text| H[Text Merger]
-    F -->|scan pages| G[OCR (OpenCV + Tesseract)]
-    G --> H
-    H --> I[Chunking & Embedding (MiniLM L6 v2)]
-    I --> J[(ChromaDB vectordb)]
-    H --> L[LLM Extraction JSON]
-    L --> M[LLM Risk Summary JSON]
-    M --> N[Write Report JSON data/reports]
-    N --> O[(SQLite app.db documents)]
-  end
-
-  subgraph Pipeline_Chat
-    E --> P[Retriever Query Chroma doc_id user_id]
-    P --> Q[Context top k]
-    Q --> R[LLM Answer with page refs]
-  end
-
-  C -. uses .-> O
-  O -. lists .-> K
-  N -. reads .-> K
+B --> F[OCR dan PDF Detector]
+B --> G[Chunking dan Embedding]
+B --> H[ChromaDB]
+B --> I[Ollama LLM]
+B --> J[Filesystem data/*]
+B --> L[SQLite db/app.db]
 ```
 
 ---
