@@ -1,6 +1,150 @@
 # Agentic Credit (Multi-User) — PDF Credit Analysis & QA
 
 Aplikasi end-to-end untuk **analisis dokumen kredit** (PDF native/scan) dan **tanya-jawab berbasis isi dokumen**. Mendukung **multi-user** dengan isolasi dokumen, **OCR otomatis** (native vs scan vs hybrid), **RAG** menggunakan ChromaDB, dan **LLM** via Ollama (Llama 3.1).
+Mantap—kamu tepat: “tenaga” utama alat ini ada di **LLM** dan **RAG**. Di bawah ini penjelasan end-to-end: cara kerja, komponen penting, tuning praktis, plus perbedaan dengan machine learning (ML) klasik.
+
+---
+
+# 1) LLM di aplikasi ini (peran, alur, dan kontrol)
+
+## Apa yang dikerjakan LLM?
+
+1. **Ekstraksi terstruktur** dari teks dokumen kredit → output JSON (bidang seperti debtor, fasilitas, bunga, tenor, dll).
+2. **Ringkasan risiko** → skor, faktor risiko, rekomendasi, dan (di kode kamu) menghitung rasio finansial turunan (DSCR, ICR, FCCR, Current/Quick Ratio, DER, EBITDA Margin) dari bagian `financials` bila tersedia.
+3. **Tanya-jawab (QA)** → jawaban ringkas **berdasarkan konteks** yang diambil oleh RAG; kalau konteks tidak ada, jawab “Tidak ditemukan di konteks”.
+
+## Bagaimana LLM dipanggil?
+
+* Via **Ollama** (lokal), model default: `llama3.1:8b-instruct-q8_0` (quantized, cepat).
+* Konfigurasi di `.env`:
+
+  * `OLLAMA_MODEL`, `OLLAMA_NUM_CTX` (panjang konteks), `OLLAMA_NUM_PREDICT` (maks token keluaran), `OLLAMA_TEMPERATURE` (kreativitas), `OLLAMA_NUM_THREAD` (CPU threads).
+* Ekstraksi & ringkasan memakai opsi `format=json` agar balasan lebih disiplin JSON (di `agent.py` versi terbaru sudah di-set).
+
+## Alur LLM (high level)
+
+1. **Ekstraksi**: prompt sistem menetapkan peran “asisten ekstraksi”; prompt pengguna memberi instruksi *“Kembalikan HANYA JSON valid”* + potongan teks dokumen.
+2. **Ringkasan risiko**: prompt kedua meringkas ke JSON berisi skor & faktor; kode menambahkan **`computed_ratios`** hasil hitungan deterministik dari angka di `financials`.
+3. **QA**: prompt sistem “jawab hanya dari konteks”; aplikasi mengirimkan top-k potongan konteks (hasil RAG) + riwayat chat singkat; LLM mengembalikan jawaban, idealnya menyertakan **(p.N)** jika metadata halaman ada.
+
+## Kekuatan LLM di sini
+
+* **Fleksibel** terhadap variasi format dokumen (surat, lampiran, memo, dll).
+* **Bilingual** ID/EN.
+* **Struktur JSON** yang bisa langsung dipakai (disiplin lewat `format=json` + sanitizer fallback).
+
+## Keterbatasan & mitigasi
+
+* **Hallucination**: dijinakkan dengan:
+
+  * QA selalu diberi konteks RAG; instruksi “kalau tak ada di konteks, bilang tidak ada”.
+  * Temperatur rendah (`0.2`) agar output stabil.
+  * Ekstraksi & ringkasan memaksa **JSON**; ada parser aman (strip code fence, hapus trailing comma).
+* **Kualitas OCR** mempengaruhi hasil → perkuat preprocessing, gunakan mode hybrid (hanya OCR halaman yang perlu), dan (opsional) tambahkan pembersih teks pasca OCR.
+
+---
+
+# 2) RAG (Retrieval-Augmented Generation): arsitektur & cara kerja
+
+## Inti RAG di proyek ini
+
+* **Vector store**: **ChromaDB** (persistent).
+* **Embedding**: `sentence-transformers/all-MiniLM-L6-v2` (ringan, umum, dimensi 384).
+* **Chunking**: potong teks jadi potongan pendek agar “pas” untuk pencarian & konteks LLM. Di kodenya:
+
+  * Variasi: chunk berbasis kata (default `chunk_size=800` kata dengan `overlap=80`) atau **per halaman** (melalui `add_pages` dengan metadata `page`).
+* **Isolasi**: setiap embedding disimpan dengan metadata `doc_id` dan `user_id`. Semua query **selalu** memakai filter:
+
+  * `where = {"$and": [{"doc_id": <doc>}, {"user_id": <user>}]}`
+    → sehingga dokumen user A **tak pernah** muncul di user B.
+
+## Alur RAG saat QA
+
+1. User bertanya → backend panggil **Chroma** dengan **query\_text** pertanyaan, filter `(doc_id, user_id)`, dan `n_results = top_k`.
+2. Ambil **top-k** potongan dengan skor tertinggi (semakin dekat hasil embedding).
+3. Backend merangkai potongan (dan, bila ada, label halaman `(p.N)`) → feed ke LLM bersama instruksi QA.
+4. LLM menjawab singkat, dengan sitasi halaman.
+
+## Kenapa RAG penting?
+
+* **Mengurangi hallucination**: jawaban dibatasi ke konten dokumen.
+* **Privasi**: retrieval berdasarkan `(doc_id, user_id)` menjaga batas dokumen tiap user.
+* **Tangguh terhadap variasi**: tanpa perlu fine-tune model, cukup masukkan konteks yang tepat.
+
+## Parameter RAG yang krusial (bisa kamu “tuning”)
+
+* **Chunk size & overlap**: besar potongannya. Kecil → lebih presisi tapi bisa putus konteks; besar → konteks utuh tapi bisa “bising”.
+* **Top-k**: jumlah potongan yang diambil. Umumnya 4–8 cukup; terlalu banyak bikin LLM over-loaded.
+* **Embedding model**: MiniLM-L6-v2 cepat; bila butuh recall lebih tinggi, pertimbangkan **E5-small** atau “domain-tuned” model (kompromi performa).
+* **Re-ranking** (opsional, belum ada di kode): setelah top-k embedding, pakai cross-encoder untuk menilai ulang (naikkan presisi konteks).
+
+---
+
+# 3) LLM + RAG: hubungan & best-practice
+
+* **LLM tanpa RAG**: model menebak sendiri dari “pengetahuan parametris” → berisiko salah/halu untuk detail dokumen spesifik.
+* **LLM + RAG**: model fokus pada **konteks** yang relevan dari dokumen → jawaban lebih akurat, auditable (ada potongan sumber).
+* **Ekstraksi**: meskipun bisa dilakukan via LLM langsung, kualitas input sangat berpengaruh (OCR, deteksi tabel). Tambahan modul ekstraksi tabel (pdfplumber/camelot untuk PDF native) dapat sangat meningkatkan akurasi angka.
+* **QA**: gunakan prompt yang tegas, temperatur rendah, dan batasi panjang konteks (pakai `num_ctx` proporsional).
+
+---
+
+# 4) Perbedaan dengan Machine Learning (ML) “klasik”
+
+| Aspek                          | LLM + RAG                                        | ML Klasik (Supervised / Feature-based)                              |
+| ------------------------------ | ------------------------------------------------ | ------------------------------------------------------------------- |
+| **Input**                      | Teks bebas (OCR/native) + retrieval konteks      | Fitur terstruktur (angka, kategori)                                 |
+| **Data label**                 | Tidak wajib (pakai model foundation pre-trained) | Wajib label untuk setiap task (training)                            |
+| **Hasil**                      | Bahasa alami + JSON ekstraksi; fleksibel format  | Prediksi numerik/kategori (skor, kelas)                             |
+| **Adaptasi domain**            | Prompt engineering + RAG (tanpa retraining)      | Perlu retraining/fine-tuning jika domain berubah                    |
+| **Kinerja pada teks variatif** | Kuat (NLU siap pakai)                            | Lemah tanpa heavy NLP pipeline                                      |
+| **Determinisme**               | Stokastik (dikontrol dgn temperatur)             | Lebih deterministik bila fiturnya jelas                             |
+| **Auditabilitas**              | RAG memberi potongan sumber (lebih auditable)    | Audit ke fitur & koefisien, tapi tidak langsung ke “kalimat sumber” |
+| **Biaya awal**                 | Relatif rendah (tak perlu labeling)              | Lebih tinggi (kumpulkan & label data)                               |
+| **Skalabilitas**               | Perlu atur konteks, top-k, latensi model         | Training sekali, inferensi cepat di task sempit                     |
+| **Kapan cocok**                | Dokumen tak terstruktur, QA, ekstraksi teks      | Scoring numerik, prediksi tabular, model kredit statistikal         |
+
+**Kapan memakai ML klasik di sistem ini?**
+
+* Untuk **risk scoring** berbasis rasio finansial historis, **PD/LGD/EAD** modeling, atau **early warning** berbasis data tabular → ML klasik (logit, tree/boosting) sering lebih presisi, mudah dipantau, dan explainable untuk regulator.
+* Aplikasi saat ini sudah menghitung rasio; jika nanti ada dataset label (default vs no-default), kamu bisa *tambahkan* model ML klasikal untuk skor risiko, sementara LLM tetap dipakai untuk **ekstraksi** & **QA**.
+
+---
+
+# 5) Bagaimana “menyetel” (tuning) agar hasil makin relevan
+
+**LLM**
+
+* Turunkan `TEMPERATURE` (mis. 0.1–0.3) untuk jawaban konsisten.
+* Batasi `NUM_PREDICT` agar jawab ringkas, koheren.
+* Perkaya prompt domain: definisi istilah perbankan, format angka Rupiah, tanggal, dll.
+* Untuk ekstraksi, tetap pakai `options={"format":"json"}` dan sanitasi hasil.
+
+**RAG**
+
+* Sesuaikan `chunk_size` dan `overlap` (contoh awal 600–900 kata, overlap 10–15%).
+* `top_k` 4–8; uji 5 vs 8 untuk melihat trade-off presisi vs kelengkapan.
+* Pertimbangkan **re-ranking** tambahan (jika presisi pengambilan konteks masih kurang).
+* Isi metadata halaman (`page`) agar QA bisa menyertakan **(p.N)**.
+
+**OCR & Tabel**
+
+* Pakai mode **hybrid** deteksi halaman → OCR hanya halaman “kosong teks”.
+* Tambahkan ekstraksi tabel **native** (pdfplumber/camelot) → angka lebih bersih masuk ke `financials` (LLM tak perlu menebak).
+
+---
+
+## Ringkasnya
+
+* **LLM** memberi kecerdasan bahasa (ekstraksi, ringkasan, QA) tanpa perlu training dataset, cocok untuk dokumen tak terstruktur.
+* **RAG** memastikan jawaban **berdasarkan isi dokumen** milik user yang benar (terisolasi), sehingga akurat & auditable.
+* **ML klasik** tetap relevan untuk skor/klasifikasi berbasis data tabular (regulator-friendly, deterministik), dan bisa **melengkapi** LLM+RAG (bukan menggantikan).
+
+Kalau kamu mau, aku bisa bantu:
+
+* Menambahkan **re-ranking** di RAG,
+* Modul ekstraksi **tabel finansial** untuk PDF native,
+* atau menyiapkan **pipeline ML** kecil untuk risk scoring dari rasio hasil ekstraksi.
 
 ## ✨ Fitur Utama
 
