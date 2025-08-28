@@ -1,134 +1,125 @@
----
-
 # Agentic Credit (Multi-User) — PDF Credit Analysis & QA
 
-Sistem end-to-end untuk **analisis dokumen kredit** (PDF native/scan), **ekstraksi JSON terstruktur**, **ringkasan risiko**, dan **Q\&A berbasis isi dokumen** dengan **RAG** (ChromaDB) + **LLM lokal** (Ollama).
-Mendukung **multi-user** (isolasi dokumen), **OCR otomatis** (native/scan/hybrid), dan **UI web bawaan** (Jinja + HttpOnly cookie).
+End-to-end app untuk **analisis dokumen kredit PDF** (native/scan) dan **tanya-jawab berbasis isi dokumen** memakai **RAG + LLM**.
+Fitur: **multi-user** dengan isolasi dokumen, **OCR otomatis**, **RAG** (ChromaDB), dan **LLM lokal** via **Ollama**.
 
 ---
 
-## ✨ Ringkasan Fitur
+## ✨ Fitur Utama
 
-* **Upload & Analisis**: OCR otomatis, ekstraksi entitas ke **JSON**, ringkasan risiko (JSON), dan rasio turunan (DSCR, ICR, FCCR, Current/Quick, DER, EBITDA Margin).
-* **RAG kuat**: indeks per halaman + **injeksi hasil ekstraksi (JSON/risk)** ke vector store (label `kind=table|json|risk`, sitasi `p.EXTRACT`).
-* **Q\&A Reasoning**: LLM menjawab **berdasarkan konteks** (OCR + tabel + JSON ekstraksi), tidak mengasumsikan selalu soal fasilitas kredit.
-* **Fast Answer (opsional)**: mode heuristik untuk pertanyaan numerik/pendek (limit/tenor/bunga) → jawaban cepat dari JSON; bisa dimatikan.
-* **Multi-user**: isolasi `user_id`+`doc_id` di SQLite & Chroma; endpoint `/docs`, `/doc/:id` berfilter user.
-* **UI Web Bawaan**: login (JWT via HttpOnly cookie), upload, preview halaman PDF, hasil analisis, dan chat QA.
-* **Telemetry Off**: variabel lingkungan mematikan telemetry Chroma/Posthog.
+* **Upload & Analisis**: Ekstraksi entitas kredit → JSON; ringkasan risiko; rasio (DSCR, ICR, FCCR, Current/Quick Ratio, DER, EBITDA Margin).
+* **Tanya-Jawab (QA)**: Jawab **hanya** dari konteks dokumen (RAG) dengan **sitasi halaman** `(p.N)` atau `p.EXTRACT`.
+* **Multi-User**: Login JWT; vektor dan dokumen **terisolasi per user**.
+* **OCR Otomatis (Hybrid)**: OCR hanya halaman yang perlu (cepat & hemat).
+* **Telemetry Off**: Chroma/PostHog dimatikan dari kode.
 
 ---
 
-## 🧭 Arsitektur
+## 🧭 Arsitektur (Ringkas)
 
 ```mermaid
 flowchart TD
   subgraph Client
-    WEB["Web UI (Jinja/HTML + app.js)"]
+    WEB["Web UI (Jinja + app.js)"]
   end
 
   subgraph Backend["FastAPI Backend"]
-    AUTH["Auth / JWT Cookies"]
-    API_ANALYZE["POST /analyze"]
-    API_CHAT["POST /chat"]
-    API_DOCS["GET /docs, /doc/{id}"]
+    AUTH["Auth/JWT Cookies"]
+    ANALYZE["POST /analyze"]
+    CHAT["POST /chat"]
+    DOCS["GET /docs, /doc/:id"]
     OCR["OCR Pipeline"]
-    AGENT["agent.py (LLM extract / risk / QA)"]
+    AGENT["agent.py (LLM extract/risk/QA)"]
     RAG["RagStore (ChromaDB)"]
-    DB["SQLite"]
-    FS["data/"]
+    DB[("(SQLite)")]
+    FS[("(data/*)")]
     OLL["Ollama (LLM lokal)"]
   end
 
-  WEB --> API_ANALYZE --> OCR --> FS
-  API_ANALYZE --> RAG
-  API_ANALYZE --> AGENT --> OLL
+  WEB --> ANALYZE --> OCR --> FS
+  ANALYZE --> RAG
+  ANALYZE --> AGENT --> OLL
   AGENT --> FS
-  API_ANALYZE --> DB
-  WEB --> API_CHAT --> RAG --> AGENT
-  API_DOCS --> DB
-```
-
-### Alur Analyze (end-to-end)
-
-1. **Deteksi PDF** → OCR **native/scan/hybrid** per halaman.
-2. Index teks per halaman ke **Chroma** (`metadatas: doc_id, user_id, page`).
-3. Ekstraksi **tabel** → ringkasan tabel ke **Chroma** (`kind=table`).
-4. **LLM** (lokal, Ollama) mengekstrak **JSON terstruktur** dan **risk\_summary**.
-5. **PATCH terbaru**: dorong **JSON** (`kind=json`, `p.EXTRACT`) & **risk** (`kind=risk`, `p.EXTRACT`) ke Chroma.
-6. Simpan **report** ke `data/reports/{doc_id}.json` (berisi `user_id`, `pages`, `json_struct`, `risk_summary`, `table_chunks`).
-7. Tulis metadata dokumen ke **SQLite**.
-
-### Alur Chat (QA)
-
-1. Query **Chroma** (filter `user_id` & `doc_id`) → ambil top-k konteks.
-2. **Inject** JSON ekstraksi di posisi **paling awal** konteks.
-3. LLM QA menjawab **hanya** dari konteks (OCR + tabel + JSON ekstraksi).
-   Jika info tidak ada → “Tidak tersedia dalam dokumen.”
-4. Sitasi mengikuti metadata halaman, termasuk **`p.EXTRACT`** untuk hasil JSON/risk.
-
----
-
-## 🧠 LLM & Reasoning
-
-* **Ollama (lokal)**, default: `llama3.1:8b-instruct-q8_0`.
-* Ekstraksi & ringkasan memakai `options.format="json"` → hasil JSON disiplin + **parser aman** sebagai fallback.
-* **Prompts terbaru** (`prompts.py`):
-
-  * QA menekankan **deteksi maksud pertanyaan** secara umum (tidak melulu fasilitas).
-  * Sitasi **konsisten**: `(p.<hal>)` atau `(p.EXTRACT)`.
-  * “Jawab hanya dari konteks; jika tidak ada, nyatakan tidak tersedia.”
-
-### Fast Answer (opsional)
-
-* Toggle via env `FAST_ANSWER_MODE`: `off | strict | smart`.
-* Jika `off` → **semua** pertanyaan lewat LLM QA (penalaran penuh).
-* `strict/smart` → hanya pertanyaan pendek & numerik (limit/tenor/bunga/total) yang **eligible** dijawab cepat dari JSON.
-  Kalau tidak yakin, jatuh ke LLM QA.
-
----
-
-## 🔐 Multi-User & Keamanan
-
-* Login via `/auth/login` → token diset sebagai **HttpOnly cookie** (`ac_token`) + CSRF dummy (`ac_csrf`).
-* Semua rute UI (`/ui/...`) **mem-proxy** ke API dengan header Authorization dari cookie.
-* Chroma **selalu** difilter `{"$and":[{"doc_id":..},{"user_id":..}]}`.
-* `/doc/:id` memverifikasi **kepemilikan** (`user_id`) sebelum mengembalikan hasil.
-
----
-
-## 📁 Struktur Proyek
-
-```
-backend/
-  main.py              # FastAPI + UI proxy + endpoints
-  agent.py             # LLM extract+risk+QA (Fast-Answer toggle, sitasi p.EXTRACT)
-  rag.py               # Chroma wrapper (add_pages, query with filters)
-  ocr_pipeline.py      # OCR native/scan/hybrid, render page png
-  table_extract.py     # ekstraksi tabel + normalisasi (opsional fleksibel/simulasi)
-  prompts.py           # sistem prompt (QA & Extract) terbaru
-  models.py, auth.py, utils.py, db_bootstrap.py
-templates/
-  app.html, login.html, partials/*.html
-static/
-  app.js, style.css
-data/
-  input/, images/, ocr/, reports/
-vectordb/              # Chroma persistent store
-db/
-  app.db               # SQLite
+  ANALYZE --> DB
+  WEB --> CHAT --> RAG --> AGENT
+  DOCS --> DB
 ```
 
 ---
 
-## ⚙️ Konfigurasi (`.env`)
+## 🔎 Alur Analyze
+
+```mermaid
+flowchart TD
+  UP["Upload PDF"] --> DET["PDF Detector (native / scan / hybrid)"]
+  DET -->|native| EX["Extract text per page (PyMuPDF)"]
+  DET -->|scan| OCR["OCR per page (Tesseract)"]
+  DET -->|hybrid| HYB["OCR low-text pages"]
+
+  EX --> MERGE["Merge text"]
+  OCR --> MERGE
+  HYB --> MERGE
+
+  MERGE --> EMB["Chunk & Embed"]
+  EMB --> VEC["ChromaDB (doc_id, user_id, page)"]
+
+  MERGE --> LLM_EX["LLM Extraction (JSON)"]
+  LLM_EX --> LLM_RISK["LLM Risk Summary (JSON)"]
+
+  LLM_RISK --> REPORT["Write data/reports/{doc_id}.json"]
+  REPORT --> DB["SQLite documents"]
+```
+
+## 💬 Alur Chat (QA)
+
+```mermaid
+flowchart TD
+  Q["User Question"] --> RET["Query Chroma (filter: doc_id, user_id)"]
+  RET --> TOPK["Top-K contexts + page metadata"]
+  TOPK --> QA["LLM QA (answer only from context)"]
+  QA --> A["Answer + citations (p.<page> / p.EXTRACT)"]
+```
+
+## 🧩 Peta Modul
+
+```mermaid
+flowchart TD
+  MAIN["backend/main.py"] --> AUTH["auth.py"]
+  MAIN --> OCRP["ocr_pipeline.py"]
+  MAIN --> RAGM["rag.py"]
+  MAIN --> AGENT["agent.py"]
+  MAIN --> MODELS["models.py"]
+  MAIN --> UTILS["utils.py"]
+  MAIN --> DBBOOT["db_bootstrap.py"]
+  AGENT --> PROMPTS["prompts.py"]
+```
+
+## 🗄️ ERD (Data Model)
+
+```mermaid
+erDiagram
+  USERS ||--o{ DOCUMENTS : owns
+  USERS {
+    int id
+    string username
+    string password_hash
+    datetime created_at
+  }
+  DOCUMENTS {
+    string id
+    int user_id
+    int pages
+    datetime created_at
+  }
+```
+
+---
+
+## ⚙️ Konfigurasi
+
+Buat file `.env` (contoh):
 
 ```ini
-# App
-APP_HOST=0.0.0.0
-APP_PORT=8000
-PUBLIC_BASE_URL=  # opsional; jika di-set, UI proxy akan mengarah ke URL ini
-
 # Ollama (LLM lokal)
 OLLAMA_HOST=http://127.0.0.1:11434
 OLLAMA_MODEL=llama3.1:8b-instruct-q8_0
@@ -139,106 +130,117 @@ OLLAMA_TEMP_EXTRACT=0.10
 OLLAMA_TEMP_QA=0.30
 OLLAMA_TOP_P_QA=0.90
 
-# Fast Answer
-FAST_ANSWER_MODE=off   # off | strict | smart
+# Fast-answer toggle (opsional): off | strict | smart
+FAST_ANSWER_MODE=smart
 
-# Telemetry off (Chroma/Posthog)
+# App
+APP_HOST=0.0.0.0
+APP_PORT=8000
+
+# Matikan telemetry
 ANONYMIZED_TELEMETRY=False
-CHROMADB_TELEMETRY=False
 CHROMA_TELEMETRY_DISABLED=1
 ```
 
+> **Catatan embedding/Chroma**
+> Saat pertama kali jalan, Chroma akan **mengunduh** model embedding ONNX (`all-MiniLM-L6-v2`) ke cache lokal (`~/.cache/chroma/...`). Ini **sekali saja**; berikutnya offline.
+
 ---
 
-## 📦 Instalasi
+## 🛠️ Instalasi & Jalankan
 
-### 1) Prasyarat
+### Prasyarat
 
 * Python 3.10+
-* **Tesseract** + **poppler** (render PDF → image)
-* **Ollama** terpasang & model ditarik:
+* Tesseract OCR (`sudo apt-get install tesseract-ocr`)
+* Ollama terpasang & model ditarik:
+  `curl -fsSL https://ollama.com/install.sh | sh` kemudian `ollama pull llama3.1:8b-instruct-q8_0`
 
-  ```bash
-  ollama pull llama3.1:8b-instruct-q8_0
-  ```
-* (Opsional) GPU NVidia untuk akselerasi Ollama.
-
-### 2) Setup cepat
+### Cepat (script)
 
 ```bash
-# di root repo
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-
-# bootstrap DB
-python -m backend.db_bootstrap
-
-# jalankan backend
-uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
+bash install_agentic_credit.sh
 ```
 
-> Catatan: Saat pertama kali, **Chroma** mungkin mengunduh model ONNX embedding (`all-MiniLM-L6-v2`, \~79MB) ke cache `~/.cache/chroma`. Satu kali saja; berikutnya pakai cache.
+### Manual
+
+```bash
+python -m venv venv
+source venv/bin/activate           # Windows: venv\Scripts\activate
+pip install -r requirements.txt
+
+# Jalankan backend
+uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
+# Akses UI: http://localhost:8000 (login lalu ke /app)
+```
+
+Struktur data:
+
+```
+data/
+  input/     # PDF
+  images/    # render halaman (PNG)
+  ocr/       # hasil OCR per halaman
+  reports/   # {doc_id}.json (json_struct + risk_summary + table_chunks)
+vectordb/    # ChromaDB (persistent)
+db/          # SQLite app.db
+```
 
 ---
 
-## 🖥️ Menjalankan UI
+## 🧠 Prompting (prompts.py)
 
-* Buka `http://localhost:8000/` → **Login** → **Upload PDF** → lihat hasil → **Chat**.
-* UI memakai **HttpOnly cookie**; JS front-end (`app.js`) memanggil rute `/ui/*` yang mem-proxy ke API.
+```python
+QA_SYSTEM_PROMPT = (
+    "Anda analis kredit korporasi berpengalaman 20 tahun.\n"
+    "Pahami maksud pertanyaan (tidak selalu tentang fasilitas kredit).\n"
+    "Jawab HANYA berdasarkan konteks (OCR/RAG, tabel terstruktur, JSON ekstraksi) yang diberikan.\n"
+    "Jika informasi tidak ada di konteks, jawab: 'Tidak tersedia dalam dokumen.'\n"
+    "Gunakan sitasi konsisten (format: p.<hal> atau p.EXTRACT) untuk setiap angka/nama penting.\n"
+    "Gunakan bahasa yang sama dengan pertanyaan (ID/EN), ringkas dan profesional.\n"
+)
+```
+
+* `agent.py` sudah memakai opsi `format="json"` untuk ekstraksi & ringkasan risiko agar output disiplin JSON.
+* Fast-answer (bila diaktifkan) hanya menjawab cepat untuk pertanyaan pendek & numerik; selebihnya selalu lewat penalaran LLM penuh.
 
 ---
 
-## 🔌 Endpoint Utama (API)
+## 🔌 API Ringkas
 
-* `POST /auth/login` → `{ access_token }`
-* `POST /analyze` (multipart `file`) → `{ doc_id, pages, json_struct, risk_summary }`
+* `POST /auth/login` → `{ "access_token": "..." }`
+* `GET /docs` → daftar dokumen user saat ini
+* `POST /analyze` (multipart `file=...pdf`) → `{ doc_id, pages, json_struct, risk_summary }`
 * `POST /chat` `{ doc_id, question, history }` → `{ answer, sources }`
-* `GET /docs` → daftar dokumen user
-* `GET /doc/:id` → report JSON (validasi kepemilikan)
-* `GET /doc/:id/page/:n` → preview PNG base64
+* `GET /doc/{doc_id}` → JSON report yang tersimpan
 * `GET /health` → `{ status: "ok" }`
 
----
-
-## 🧪 Perilaku Penting (sesuai patch terbaru)
-
-* **Injeksi JSON & Risk ke RAG**
-  Setelah ekstraksi, backend mendorong:
-
-  * `kind=json`, `page="EXTRACT"` → isi `json_struct`
-  * `kind=risk`, `page="EXTRACT"` → isi `risk_summary`
-    Sehingga QA dapat mengutip `(p.EXTRACT)` untuk poin dari ekstraksi.
-
-* **QA Reasoning luas**
-  Prompt QA tidak mengasumsikan pertanyaan selalu soal fasilitas; dia **mendeteksi maksud** (profil, manajemen, tujuan, finansial, dsb.) dan menjawab dari konteks relevan.
-
-* **Fast-Answer (opsional)**
-  Jika `FAST_ANSWER_MODE!=off`, pertanyaan numerik/pendek tertentu dijawab cepat dari JSON. Jika tidak yakin, jatuh ke QA LLM.
+> Semua endpoint (kecuali `/health` & halaman login) memerlukan header `Authorization: Bearer <token>` atau cookie HttpOnly dari UI.
 
 ---
 
-## 🧰 Tuning & Tips
+## ⚖️ Keamanan & Isolasi
 
-* **RAG**: `n_results=5`–`8`; pastikan `page` terisi supaya sitasi `(p.N)` muncul.
-* **Chunking tabel**: `kind=table` membantu QA menemukan angka.
-* **NUM\_PREDICT**: 800–1200 cukup untuk jawaban singkat namun informatif.
-* **Temperatur**: rendah (0.1–0.3) untuk konsistensi, khusus QA.
-* **Cache Chroma**: mount volume cache di Docker (`~/.cache/chroma`) agar **sekali unduh**.
+* **Per user**: `documents.user_id` di SQLite; RAG selalu filter `{"$and":[{"doc_id":...},{"user_id":...}]}`.
+* **Sitasi**: metadata `page` disimpan agar jawaban bisa menyertakan `(p.N)` / `p.EXTRACT`.
 
 ---
 
-## 🧩 Roadmap
+## 🧪 Troubleshooting
 
-* Re-ranking (cross-encoder) setelah embedding untuk presisi konteks lebih tinggi.
-* Ekstraksi tabel finansial **native PDF** (pdfplumber/camelot) untuk akurasi angka.
-* Validasi skema hasil JSON (Pydantic) + versioning.
-* Redaksi otomatis identitas sensitif (NPWP/NIK) dalam report.
+* **Chroma download ONNX** → normal saat pertama jalan; biarkan selesai (sekali saja).
+* **Model Ollama tidak ditemukan** → `ollama list`, lalu `ollama pull llama3.1:8b-instruct-q8_0`.
+* **Tesseract missing** → `sudo apt-get install tesseract-ocr`.
+* **DB error** → pastikan folder `db/` ada & writeable.
+* **Jawaban terlalu pendek/panjang** → atur `OLLAMA_NUM_PREDICT` dan `TEMP_QA`.
 
 ---
 
-## 📜 Lisensi
+## 📈 Roadmap Singkat
 
-MDI 2025
+* Re-ranking (cross-encoder) setelah embedding untuk presisi konteks lebih baik.
+* Ekstraksi tabel finansial PDF teks (pdfplumber/camelot) → isi `financials` lebih akurat.
+* Validasi skema hasil JSON (pydantic) + versioning.
+* Redaksi otomatis identitas sensitif (NPWP/NIK) saat simpan.
 
 ---
