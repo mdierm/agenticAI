@@ -24,29 +24,29 @@ Mendukung **multi-user** (isolasi dokumen), **OCR otomatis** (native/scan/hybrid
 ```mermaid
 flowchart TD
   subgraph Client
-    WEB[Web UI (Jinja/HTML + app.js)]
+    WEB["Web UI (Jinja/HTML + app.js)"]
   end
 
-  subgraph Backend[FastAPI Backend]
-    AUTH[Auth/JWT Cookies]
-    ANALYZE[/POST /analyze/]
-    CHAT[/POST /chat/]
-    DOCS[/GET /docs, /doc/:id/]
-    OCR[OCR Pipeline]
-    AGENT[agent.py (LLM extract/risk/QA)]
-    RAG[RagStore (ChromaDB)]
-    DB[(SQLite)]
-    FS[(data/)]
-    OLL[Ollama (LLM lokal)]
+  subgraph Backend["FastAPI Backend"]
+    AUTH["Auth / JWT Cookies"]
+    API_ANALYZE["POST /analyze"]
+    API_CHAT["POST /chat"]
+    API_DOCS["GET /docs, /doc/{id}"]
+    OCR["OCR Pipeline"]
+    AGENT["agent.py (LLM extract / risk / QA)"]
+    RAG["RagStore (ChromaDB)"]
+    DB["SQLite"]
+    FS["data/"]
+    OLL["Ollama (LLM lokal)"]
   end
 
-  WEB --> ANALYZE --> OCR --> FS
-  ANALYZE --> RAG
-  ANALYZE --> AGENT --> OLL
+  WEB --> API_ANALYZE --> OCR --> FS
+  API_ANALYZE --> RAG
+  API_ANALYZE --> AGENT --> OLL
   AGENT --> FS
-  ANALYZE --> DB
-  WEB --> CHAT --> RAG --> AGENT
-  DOCS --> DB
+  API_ANALYZE --> DB
+  WEB --> API_CHAT --> RAG --> AGENT
+  API_DOCS --> DB
 ```
 
 ### Alur Analyze (end-to-end)
